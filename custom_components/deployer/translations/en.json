@@ -1,0 +1,75 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to a Git Forge",
+        "description": "A **Git forge** is a platform that hosts Git repositories, such as GitHub, GitLab, Gitea, or a self-hosted instance.\n\nEnter the base URL of your forge and a connection name. **Leave the token fields empty for public repositories.**",
+        "data": {
+          "name": "Connection Name",
+          "server_url": "Forge URL",
+          "token_username": "Token Username",
+          "token": "Access Token"
+        },
+        "data_description": {
+          "name": "A label to identify this forge (e.g. My GitLab).",
+          "server_url": "Base URL of the forge (e.g. https://gitlab.com or https://github.com).",
+          "token_username": "Only required for deploy tokens — leave empty when using a Personal Access Token or for public repos.",
+          "token": "Personal Access Token or deploy token. Leave empty for public repositories."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the forge. Check the URL.",
+      "invalid_token": "Token is invalid or lacks the required permission."
+    },
+    "abort": {
+      "already_configured": "This forge is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Manage Components",
+        "menu_options": {
+          "add_component": "Add component",
+          "remove_component": "Remove component"
+        }
+      },
+      "add_component": {
+        "title": "Add Component",
+        "description": "Configure a component to manage. archive_subdir: {archive_subdir_hint}",
+        "data": {
+          "project_path": "Project Path",
+          "component_name": "Component Name",
+          "mode": "Tracking Mode",
+          "ref": "Branch or Tag",
+          "archive_subdir": "Archive Subdir",
+          "auto_update": "Auto-update when update is available"
+        },
+        "data_description": {
+          "project_path": "Namespace and project name only — do not include the forge URL or .git suffix (e.g. mygroup/my-integration, not https://github.com/mygroup/my-integration).",
+          "component_name": "Folder name inside custom_components/ (e.g. my_integration).",
+          "mode": "branch = always track the latest commit; tag = pin to a specific version.",
+          "ref": "Branch name (e.g. main) or tag (e.g. v1.2.0).",
+          "archive_subdir": "Path within the repo to the component folder. Leave empty if the component is at the repo root (e.g. custom_components/my_integration).",
+          "auto_update": "Automatically install when a new commit is detected on the configured branch."
+        }
+      },
+      "remove_component": {
+        "title": "Remove Component",
+        "data": {
+          "component": "Select component to remove"
+        }
+      }
+    },
+    "error": {
+      "duplicate_component": "A component with this name is already configured.",
+      "invalid_token": "Token is invalid or lacks read_repository permission for this project.",
+      "project_not_found": "Project not found — check the project path.",
+      "cannot_connect": "Could not connect to the forge."
+    },
+    "abort": {
+      "no_components": "No components are configured yet."
+    }
+  }
+}

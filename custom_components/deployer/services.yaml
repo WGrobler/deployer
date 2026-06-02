@@ -1,0 +1,78 @@
+install:
+  name: Install / Update Component
+  description: Download and install a component from the repository at its configured ref. HA must be restarted after installation for the component to load.
+  fields:
+    component_name:
+      name: Component Name
+      description: The name of the component (matches the custom_components folder name).
+      required: true
+      example: my_integration
+      selector:
+        text:
+
+check_updates:
+  name: Check for Updates
+  description: Refresh update status for all configured components by querying the remote.
+
+update_all:
+  name: Update All (Auto-Update)
+  description: Install latest version for all components that have auto_update enabled and have an update available.
+
+restart_ha:
+  name: Restart Home Assistant
+  description: Restart Home Assistant — required to activate newly installed or updated components.
+
+add_component:
+  name: Add Component
+  description: Add a new component to manage. Validates repository access before saving.
+  fields:
+    project_path:
+      name: Project Path
+      description: "Namespace and project name only — do not include the forge URL or .git suffix (e.g. mygroup/my-integration, not https://github.com/mygroup/my-integration)."
+      required: true
+      example: mygroup/my-integration
+      selector:
+        text:
+    component_name:
+      name: Component Name
+      description: Folder name used in custom_components.
+      required: true
+      example: my_integration
+      selector:
+        text:
+    mode:
+      name: Mode
+      description: branch = track latest commit; tag = pin to a specific version.
+      selector:
+        select:
+          options:
+            - branch
+            - tag
+    ref:
+      name: Branch or Tag
+      description: Branch name or tag to install from.
+      example: main
+      selector:
+        text:
+    archive_subdir:
+      name: Archive Subdir
+      description: Path within the repo to the component folder (e.g. custom_components/my_integration). Leave empty if the component is at the repo root.
+      example: custom_components/my_integration
+      selector:
+        text:
+    auto_update:
+      name: Auto Update
+      description: Automatically update this component when a new commit is detected.
+      selector:
+        boolean:
+
+remove_component:
+  name: Remove Component
+  description: Remove a component from management (does not uninstall the files).
+  fields:
+    component_name:
+      name: Component Name
+      description: The component_name to remove.
+      required: true
+      selector:
+        text:
