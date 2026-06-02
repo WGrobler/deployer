@@ -6,6 +6,7 @@ from typing import Any
 import voluptuous as vol
 from .installer import build_clone_url, _run
 from homeassistant import config_entries
+from homeassistant.helpers.event import async_call_later
 from .const import (
 	CONF_ARCHIVE_SUBDIR,
 	CONF_AUTO_UPDATE,
@@ -149,14 +150,23 @@ class ComponentUpdaterOptionsFlow(config_entries.OptionsFlow):
 				if error:
 					errors["base"] = error
 			if not errors:
+				component_name = user_input[CONF_COMPONENT_NAME].strip()
 				self._components.append({
 					CONF_PROJECT_PATH: user_input[CONF_PROJECT_PATH].strip(),
-					CONF_COMPONENT_NAME: user_input[CONF_COMPONENT_NAME].strip(),
+					CONF_COMPONENT_NAME: component_name,
 					CONF_MODE: user_input[CONF_MODE],
 					CONF_REF: user_input[CONF_REF].strip(),
 					CONF_ARCHIVE_SUBDIR: user_input.get(CONF_ARCHIVE_SUBDIR, "").strip(),
 					CONF_AUTO_UPDATE: user_input.get(CONF_AUTO_UPDATE, False),
 				})
+				# Auto-install after the options reload completes (~5s)
+				def _trigger_install(_now):
+					self.hass.async_create_task(
+						self.hass.services.async_call(
+							DOMAIN, "install", {"component_name": component_name}
+						)
+					)
+				async_call_later(self.hass, 5, _trigger_install)
 				return self.async_create_entry(title="", data={CONF_COMPONENTS: self._components})
 
 		return self.async_show_form(
