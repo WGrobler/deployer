@@ -44,14 +44,16 @@
           "mode": "Tracking Mode",
           "ref": "Branch or Tag",
           "archive_subdir": "Archive Subdir",
+          "dest_type": "Destination Type",
           "auto_update": "Auto-update when update is available"
         },
         "data_description": {
           "project_path": "Namespace and project name only — do not include the forge URL or .git suffix (e.g. mygroup/my-integration, not https://github.com/mygroup/my-integration).",
-          "component_name": "Folder name inside custom_components/ (e.g. my_integration).",
+          "component_name": "Folder name used as the install target (e.g. my_integration for custom_components, or my-card for www).",
           "mode": "branch = always track the latest commit; tag = pin to a specific version.",
           "ref": "Branch name (e.g. main) or tag (e.g. v1.2.0).",
-          "archive_subdir": "Path within the repo to the component folder. Leave empty if the component is at the repo root (e.g. custom_components/my_integration).",
+          "archive_subdir": "Path within the repo to copy. Leave empty to copy the entire repo root (e.g. custom_components/my_integration or dist).",
+          "dest_type": "custom_component = installs to /config/custom_components/ and requires HA restart. www = installs to /config/www/ and registers Lovelace resources (for dashboard cards — no restart needed).",
           "auto_update": "Automatically install when a new commit is detected on the configured branch."
         }
       },

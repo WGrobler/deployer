@@ -56,10 +56,18 @@ add_component:
         text:
     archive_subdir:
       name: Archive Subdir
-      description: Path within the repo to the component folder (e.g. custom_components/my_integration). Leave empty if the component is at the repo root.
+      description: Path within the repo to copy (e.g. custom_components/my_integration or dist). Leave empty to copy the entire repo root.
       example: custom_components/my_integration
       selector:
         text:
+    dest_type:
+      name: Destination Type
+      description: "custom_component = installs to /config/custom_components/ (requires HA restart). www = installs to /config/www/ and registers Lovelace resources (for dashboard cards)."
+      selector:
+        select:
+          options:
+            - custom_component
+            - www
     auto_update:
       name: Auto Update
       description: Automatically update this component when a new commit is detected.

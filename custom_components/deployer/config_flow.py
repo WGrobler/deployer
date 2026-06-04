@@ -12,6 +12,7 @@ from .const import (
 	CONF_AUTO_UPDATE,
 	CONF_COMPONENT_NAME,
 	CONF_COMPONENTS,
+	CONF_DEST_TYPE,
 	CONF_SERVER_URL,
 	CONF_MODE,
 	CONF_PROJECT_PATH,
@@ -19,6 +20,8 @@ from .const import (
 	CONF_TOKEN,
 	CONF_TOKEN_USERNAME,
 	DEFAULT_SERVER_URL,
+	DEST_TYPE_CUSTOM_COMPONENT,
+	DEST_TYPE_WWW,
 	DOMAIN,
 	MODE_BRANCH,
 	MODE_TAG,
@@ -35,6 +38,7 @@ def _component_schema(defaults: dict | None = None) -> vol.Schema:
 		vol.Required(CONF_MODE, default=d.get(CONF_MODE, MODE_BRANCH)): vol.In([MODE_BRANCH, MODE_TAG]),
 		vol.Required(CONF_REF, default=d.get(CONF_REF, "main")): str,
 		vol.Optional(CONF_ARCHIVE_SUBDIR, default=d.get(CONF_ARCHIVE_SUBDIR, "")): str,
+		vol.Required(CONF_DEST_TYPE, default=d.get(CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT)): vol.In([DEST_TYPE_CUSTOM_COMPONENT, DEST_TYPE_WWW]),
 		vol.Optional(CONF_AUTO_UPDATE, default=d.get(CONF_AUTO_UPDATE, False)): bool,
 	})
 
@@ -157,6 +161,7 @@ class ComponentUpdaterOptionsFlow(config_entries.OptionsFlow):
 					CONF_MODE: user_input[CONF_MODE],
 					CONF_REF: user_input[CONF_REF].strip(),
 					CONF_ARCHIVE_SUBDIR: user_input.get(CONF_ARCHIVE_SUBDIR, "").strip(),
+					CONF_DEST_TYPE: user_input.get(CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT),
 					CONF_AUTO_UPDATE: user_input.get(CONF_AUTO_UPDATE, False),
 				})
 				# Auto-install after the options reload completes (~5s)

@@ -7,7 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
 
-from .const import CONF_COMPONENTS, DOMAIN
+from .const import CONF_COMPONENTS, CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT, DOMAIN
 from .coordinator import DeployerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -63,24 +63,27 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 			CONF_COMPONENTS, CONF_MODE, CONF_PROJECT_PATH, CONF_REF,
 		)
 		from .installer import _run, build_clone_url
-
-		# Use the first (and typically only) config entry
-		coord = next(iter(hass.data[DOMAIN].values()))
-		entry = coord.entry
+		from homeassistant.helpers.event import async_call_later
 
 		component_name: str = call.data["component_name"]
-		existing = [c[CONF_COMPONENT_NAME] for c in coord.components]
-		if component_name in existing:
-			raise ValueError(f"Component '{component_name}' is already configured")
-
 		project_path: str = call.data["project_path"]
 		ref: str = call.data.get("ref", "main")
 
-		# Validate access before saving
-		clone_url = build_clone_url(coord.server_url, coord.token, coord.token_username, project_path)
-		rc, stdout, stderr = await _run(["git", "ls-remote", clone_url, "HEAD"], timeout=15)
-		if rc != 0:
-			raise ValueError(f"Cannot access repository '{project_path}': {stderr.strip()}")
+		# Check component doesn't already exist across all entries
+		for c in hass.data[DOMAIN].values():
+			if component_name in [x[CONF_COMPONENT_NAME] for x in c.components]:
+				raise ValueError(f"Component '{component_name}' is already configured")
+
+		# Find the first entry whose credentials can reach the project
+		coord = None
+		for candidate in hass.data[DOMAIN].values():
+			test_url = build_clone_url(candidate.server_url, candidate.token, candidate.token_username, project_path)
+			rc, stdout, stderr = await _run(["git", "ls-remote", test_url, "HEAD"], timeout=15)
+			if rc == 0:
+				coord = candidate
+				break
+		if coord is None:
+			raise ValueError(f"Cannot access repository '{project_path}' with any configured forge credentials")
 
 		new_comp = {
 			CONF_PROJECT_PATH: project_path,
@@ -88,24 +91,32 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 			CONF_MODE: call.data.get("mode", "branch"),
 			CONF_REF: ref,
 			CONF_ARCHIVE_SUBDIR: call.data.get("archive_subdir", ""),
+			CONF_DEST_TYPE: call.data.get("dest_type", DEST_TYPE_CUSTOM_COMPONENT),
 			CONF_AUTO_UPDATE: call.data.get("auto_update", False),
 		}
 		updated_components = list(coord.components) + [new_comp]
 		hass.config_entries.async_update_entry(
-			entry, options={CONF_COMPONENTS: updated_components}
+			coord.entry, options={CONF_COMPONENTS: updated_components}
 		)
 		_LOGGER.info("Added component %s to deployer", component_name)
 
+		# Auto-install after options reload (~5s), same as config flow
+		def _trigger_install(_now):
+			hass.async_create_task(
+				hass.services.async_call(DOMAIN, "install", {"component_name": component_name})
+			)
+		async_call_later(hass, 5, _trigger_install)
+
 	async def handle_remove_component(call: ServiceCall) -> None:
 		from .const import CONF_COMPONENT_NAME, CONF_COMPONENTS
-		coord = next(iter(hass.data[DOMAIN].values()))
-		entry = coord.entry
 		component_name: str = call.data["component_name"]
-		updated = [c for c in coord.components if c[CONF_COMPONENT_NAME] != component_name]
-		if len(updated) == len(coord.components):
-			raise ValueError(f"Component '{component_name}' not found")
-		hass.config_entries.async_update_entry(entry, options={CONF_COMPONENTS: updated})
-		_LOGGER.info("Removed component %s from deployer", component_name)
+		for coord in hass.data[DOMAIN].values():
+			updated = [c for c in coord.components if c[CONF_COMPONENT_NAME] != component_name]
+			if len(updated) < len(coord.components):
+				hass.config_entries.async_update_entry(coord.entry, options={CONF_COMPONENTS: updated})
+				_LOGGER.info("Removed component %s from deployer", component_name)
+				return
+		raise ValueError(f"Component '{component_name}' not found in any configured entry")
 
 	hass.services.async_register(
 		DOMAIN, "install", handle_install,
@@ -122,6 +133,7 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 			vol.Optional("mode", default="branch"): vol.In(["branch", "tag"]),
 			vol.Optional("ref", default="main"): cv.string,
 			vol.Optional("archive_subdir", default=""): cv.string,
+			vol.Optional("dest_type", default=DEST_TYPE_CUSTOM_COMPONENT): vol.In([DEST_TYPE_CUSTOM_COMPONENT, "www"]),
 			vol.Optional("auto_update", default=False): cv.boolean,
 		}),
 	)
@@ -138,7 +150,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 	# Remove services when last entry is unloaded
 	if not hass.data.get(DOMAIN):
-		for service in ("install", "check_updates", "update_all", "restart_ha"):
+		for service in ("install", "check_updates", "update_all", "restart_ha", "add_component", "remove_component"):
 			hass.services.async_remove(DOMAIN, service)
 
 	return unload_ok
