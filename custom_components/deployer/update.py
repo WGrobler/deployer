@@ -62,8 +62,10 @@ class DeployerUpdateEntity(CoordinatorEntity, UpdateEntity):
 		d = self._data
 		if d.get("mode") == MODE_BRANCH:
 			commit = d.get("installed_commit")
-			return commit[:7] if commit else None
-		return d.get("installed_ref") or None
+			# Return "not_installed" rather than None so HA state resolves to ON
+			# (None causes state=unknown which hides the Install button in 2026.x)
+			return commit[:7] if commit else "not_installed"
+		return d.get("installed_ref") or "not_installed"
 
 	@property
 	def latest_version(self) -> str | None:

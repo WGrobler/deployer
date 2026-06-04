@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+
 from homeassistant.core import HomeAssistant
 
 from .const import CONF_ARCHIVE_SUBDIR, CONF_COMPONENT_NAME, CONF_PROJECT_PATH, CONF_REF
@@ -112,7 +113,7 @@ async def install_component(
 	component_name = comp[CONF_COMPONENT_NAME]
 	project_path = comp[CONF_PROJECT_PATH]
 	ref = comp[CONF_REF]
-	archive_subdir = comp.get(CONF_ARCHIVE_SUBDIR, "")
+	archive_subdir = comp.get(CONF_ARCHIVE_SUBDIR, "").strip().lstrip("/")
 
 	clone_url = build_clone_url(server_url, token, token_username, project_path)
 	dest_path = _custom_components_path(hass) / component_name
@@ -148,3 +149,17 @@ async def install_component(
 	}
 	await hass.async_add_executor_job(_save_meta, hass, component_name, meta)
 	_LOGGER.info("Installed %s (%s @ %s)", component_name, commit_sha or "?", ref)
+
+	short_sha = commit_sha[:7] if commit_sha else ref
+	await hass.services.async_call(
+		"persistent_notification",
+		"create",
+		{
+			"title": "Deployer: Restart Required",
+			"message": (
+				f"**{component_name}** ({short_sha}) has been installed.\n\n"
+				"Restart Home Assistant to activate the changes."
+			),
+			"notification_id": f"deployer_restart_{component_name}",
+		},
+	)
