@@ -4,7 +4,7 @@ import logging
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import config_validation as cv
 
 from .const import CONF_COMPONENTS, CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT, DOMAIN
@@ -76,14 +76,21 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 
 		# Find the first entry whose credentials can reach the project
 		coord = None
+		last_err = ""
 		for candidate in hass.data[DOMAIN].values():
 			test_url = build_clone_url(candidate.server_url, candidate.token, candidate.token_username, project_path)
 			rc, stdout, stderr = await _run(["git", "ls-remote", test_url, "HEAD"], timeout=15)
 			if rc == 0:
 				coord = candidate
 				break
+			last_err = stderr.strip() or last_err
 		if coord is None:
-			raise ValueError(f"Cannot access repository '{project_path}' with any configured forge credentials")
+			# Surface git's own stderr so a DNS/network failure isn't disguised as a
+			# credentials problem (e.g. "Could not resolve host" vs "Authentication failed").
+			detail = f": {last_err}" if last_err else ""
+			raise ValueError(
+				f"Cannot access repository '{project_path}' with any configured forge credentials{detail}"
+			)
 
 		new_comp = {
 			CONF_PROJECT_PATH: project_path,
@@ -100,11 +107,21 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 		)
 		_LOGGER.info("Added component %s to deployer", component_name)
 
-		# Auto-install after options reload (~5s), same as config flow
+		# Auto-install after options reload (~5s), same as config flow. Must be an
+		# @callback so HA runs it on the event loop; a plain sync function is dispatched
+		# to an executor thread, where async_create_task raises a thread-safety error.
+		@callback
 		def _trigger_install(_now):
-			hass.async_create_task(
-				hass.services.async_call(DOMAIN, "install", {"component_name": component_name})
-			)
+			async def _do_install():
+				try:
+					await hass.services.async_call(
+						DOMAIN, "install", {"component_name": component_name}, blocking=True
+					)
+				except Exception as err:  # noqa: BLE001 — surface install failures instead of leaking
+					_LOGGER.error("Deployer: auto-install of %s failed: %s", component_name, err)
+
+			hass.async_create_task(_do_install(), name=f"deployer_autoinstall_{component_name}")
+
 		async_call_later(hass, 5, _trigger_install)
 
 	async def handle_remove_component(call: ServiceCall) -> None:

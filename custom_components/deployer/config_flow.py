@@ -6,6 +6,7 @@ from typing import Any
 import voluptuous as vol
 from .installer import build_clone_url, _run
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.helpers.event import async_call_later
 from .const import (
 	CONF_ARCHIVE_SUBDIR,
@@ -164,14 +165,25 @@ class ComponentUpdaterOptionsFlow(config_entries.OptionsFlow):
 					CONF_DEST_TYPE: user_input.get(CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT),
 					CONF_AUTO_UPDATE: user_input.get(CONF_AUTO_UPDATE, False),
 				})
-				# Auto-install after the options reload completes (~5s)
+				# Auto-install after the options reload completes (~5s). The callback must
+				# be an @callback so HA runs it on the event loop — a plain sync function
+				# is dispatched to an executor thread, where async_create_task raises a
+				# thread-safety RuntimeError.
+				hass = self.hass
+
+				@callback
 				def _trigger_install(_now):
-					self.hass.async_create_task(
-						self.hass.services.async_call(
-							DOMAIN, "install", {"component_name": component_name}
-						)
-					)
-				async_call_later(self.hass, 5, _trigger_install)
+					async def _do_install():
+						try:
+							await hass.services.async_call(
+								DOMAIN, "install", {"component_name": component_name}, blocking=True
+							)
+						except Exception as err:  # noqa: BLE001 — surface install failures instead of leaking
+							_LOGGER.error("Deployer: auto-install of %s failed: %s", component_name, err)
+
+					hass.async_create_task(_do_install(), name=f"deployer_autoinstall_{component_name}")
+
+				async_call_later(hass, 5, _trigger_install)
 				return self.async_create_entry(title="", data={CONF_COMPONENTS: self._components})
 
 		return self.async_show_form(

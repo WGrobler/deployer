@@ -140,8 +140,27 @@ async def _register_lovelace_resources(
 	lovelace_data = hass.data.get("lovelace")
 	resources = getattr(lovelace_data, "resources", None)
 	if resources is None:
-		_LOGGER.warning("Deployer: lovelace resources collection not available — register resources manually")
+		_LOGGER.error(
+			"Deployer: Lovelace resources collection unavailable — register the %s resources "
+			"manually under Settings → Dashboards → Resources", component_name,
+		)
 		return []
+
+	# YAML-mode resources are read-only; they cannot be registered programmatically.
+	if not hasattr(resources, "async_create_item"):
+		_LOGGER.error(
+			"Deployer: Lovelace is in YAML resource mode — add the %s resources to your "
+			"lovelace resources YAML manually", component_name,
+		)
+		return []
+
+	# A storage-backed ResourceStorageCollection must be loaded before its items can be
+	# listed or created. Right after a config-entry reload (e.g. the auto-install that
+	# follows add_component) it often isn't loaded yet, so async_items()/async_create_item
+	# would silently no-op. Force a load first.
+	if getattr(resources, "loaded", True) is False:
+		await resources.async_load()
+		resources.loaded = True
 
 	version_suffix = f"?v={commit_sha[:7]}" if commit_sha else ""
 	# Map base URL (without query string) → resource id for existing entries
