@@ -1,18 +1,48 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
-from .const import CONF_COMPONENTS, CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT, DOMAIN
+from .const import CONF_COMPONENT_NAME, CONF_COMPONENTS, CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT, DOMAIN
 from .coordinator import DeployerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["update"]
+
+
+async def _install_when_ready(hass: HomeAssistant, component_name: str) -> None:
+	"""Install a freshly-added component once the options reload registers it.
+
+	async_update_entry / async_create_entry reload the config entry asynchronously.
+	Until that reload completes the coordinator does not yet list the new component,
+	and deployer.install raises "not found in any configured entry". The previous
+	implementation fired a fixed 5s timer that raced the reload and frequently lost,
+	leaving the component undeployed. Poll for the component instead (up to ~30s) so
+	the install can never lose the race.
+	"""
+	for _ in range(30):
+		for coord in hass.data.get(DOMAIN, {}).values():
+			if component_name in [c[CONF_COMPONENT_NAME] for c in coord.components]:
+				try:
+					await hass.services.async_call(
+						DOMAIN, "install", {"component_name": component_name}, blocking=True
+					)
+				except Exception as err:  # noqa: BLE001 — surface install failures instead of leaking
+					_LOGGER.error("Deployer: auto-install of %s failed: %s", component_name, err)
+				return
+		await asyncio.sleep(1)
+	_LOGGER.error(
+		"Deployer: %s was not registered within 30s of being added; skipping "
+		"auto-install. Run the deployer.install service manually once it appears.",
+		component_name,
+	)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -63,7 +93,6 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 			CONF_COMPONENTS, CONF_MODE, CONF_PROJECT_PATH, CONF_REF,
 		)
 		from .installer import _run, build_clone_url
-		from homeassistant.helpers.event import async_call_later
 
 		component_name: str = call.data["component_name"]
 		project_path: str = call.data["project_path"]
@@ -72,7 +101,9 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 		# Check component doesn't already exist across all entries
 		for c in hass.data[DOMAIN].values():
 			if component_name in [x[CONF_COMPONENT_NAME] for x in c.components]:
-				raise ValueError(f"Component '{component_name}' is already configured")
+				raise ServiceValidationError(
+					f"Component '{component_name}' is already configured"
+				)
 
 		# Find the first entry whose credentials can reach the project
 		coord = None
@@ -88,7 +119,7 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 			# Surface git's own stderr so a DNS/network failure isn't disguised as a
 			# credentials problem (e.g. "Could not resolve host" vs "Authentication failed").
 			detail = f": {last_err}" if last_err else ""
-			raise ValueError(
+			raise ServiceValidationError(
 				f"Cannot access repository '{project_path}' with any configured forge credentials{detail}"
 			)
 
@@ -107,22 +138,14 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 		)
 		_LOGGER.info("Added component %s to deployer", component_name)
 
-		# Auto-install after options reload (~5s), same as config flow. Must be an
-		# @callback so HA runs it on the event loop; a plain sync function is dispatched
-		# to an executor thread, where async_create_task raises a thread-safety error.
-		@callback
-		def _trigger_install(_now):
-			async def _do_install():
-				try:
-					await hass.services.async_call(
-						DOMAIN, "install", {"component_name": component_name}, blocking=True
-					)
-				except Exception as err:  # noqa: BLE001 — surface install failures instead of leaking
-					_LOGGER.error("Deployer: auto-install of %s failed: %s", component_name, err)
-
-			hass.async_create_task(_do_install(), name=f"deployer_autoinstall_{component_name}")
-
-		async_call_later(hass, 5, _trigger_install)
+		# Auto-install once the options update above has reloaded the entry and the
+		# new component is registered. Polling (see _install_when_ready) replaces the
+		# old fixed 5s timer, which raced the reload and failed with "not found in any
+		# configured entry".
+		hass.async_create_task(
+			_install_when_ready(hass, component_name),
+			name=f"deployer_autoinstall_{component_name}",
+		)
 
 	async def handle_remove_component(call: ServiceCall) -> None:
 		from .const import CONF_COMPONENT_NAME, CONF_COMPONENTS

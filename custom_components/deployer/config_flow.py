@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 import voluptuous as vol
 from .installer import build_clone_url, _run
 from homeassistant import config_entries
-from homeassistant.core import callback
-from homeassistant.helpers.event import async_call_later
 from .const import (
 	CONF_ARCHIVE_SUBDIR,
 	CONF_AUTO_UPDATE,
@@ -29,6 +28,32 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _install_when_ready(hass, component_name: str) -> None:
+	"""Install a freshly-added component once the options reload registers it.
+
+	async_create_entry reloads the entry asynchronously; until that finishes the
+	coordinator does not list the new component and deployer.install raises "not
+	found in any configured entry". The old code used a fixed 5s timer that raced
+	the reload; poll for up to ~30s instead so the timing can never lose the race.
+	"""
+	for _ in range(30):
+		for coord in hass.data.get(DOMAIN, {}).values():
+			if component_name in [c[CONF_COMPONENT_NAME] for c in coord.components]:
+				try:
+					await hass.services.async_call(
+						DOMAIN, "install", {"component_name": component_name}, blocking=True
+					)
+				except Exception as err:  # noqa: BLE001 — surface install failures instead of leaking
+					_LOGGER.error("Deployer: auto-install of %s failed: %s", component_name, err)
+				return
+		await asyncio.sleep(1)
+	_LOGGER.error(
+		"Deployer: %s was not registered within 30s of being added; skipping "
+		"auto-install. Run the deployer.install service manually once it appears.",
+		component_name,
+	)
 
 
 def _component_schema(defaults: dict | None = None) -> vol.Schema:
@@ -165,25 +190,14 @@ class ComponentUpdaterOptionsFlow(config_entries.OptionsFlow):
 					CONF_DEST_TYPE: user_input.get(CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT),
 					CONF_AUTO_UPDATE: user_input.get(CONF_AUTO_UPDATE, False),
 				})
-				# Auto-install after the options reload completes (~5s). The callback must
-				# be an @callback so HA runs it on the event loop — a plain sync function
-				# is dispatched to an executor thread, where async_create_task raises a
-				# thread-safety RuntimeError.
-				hass = self.hass
-
-				@callback
-				def _trigger_install(_now):
-					async def _do_install():
-						try:
-							await hass.services.async_call(
-								DOMAIN, "install", {"component_name": component_name}, blocking=True
-							)
-						except Exception as err:  # noqa: BLE001 — surface install failures instead of leaking
-							_LOGGER.error("Deployer: auto-install of %s failed: %s", component_name, err)
-
-					hass.async_create_task(_do_install(), name=f"deployer_autoinstall_{component_name}")
-
-				async_call_later(hass, 5, _trigger_install)
+				# Auto-install once async_create_entry below has reloaded the entry and
+				# the component is registered. Polling (see _install_when_ready) replaces
+				# the old fixed 5s timer, which raced the reload and failed with "not
+				# found in any configured entry".
+				self.hass.async_create_task(
+					_install_when_ready(self.hass, component_name),
+					name=f"deployer_autoinstall_{component_name}",
+				)
 				return self.async_create_entry(title="", data={CONF_COMPONENTS: self._components})
 
 		return self.async_show_form(
