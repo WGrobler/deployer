@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 import voluptuous as vol
-from .installer import build_clone_url, _run
+from .installer import _run
 from homeassistant import config_entries
+from .util import build_clone_url, install_in_background
 from .const import (
 	CONF_ARCHIVE_SUBDIR,
 	CONF_AUTO_UPDATE,
@@ -28,32 +28,6 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-
-async def _install_when_ready(hass, component_name: str) -> None:
-	"""Install a freshly-added component once the options reload registers it.
-
-	async_create_entry reloads the entry asynchronously; until that finishes the
-	coordinator does not list the new component and deployer.install raises "not
-	found in any configured entry". The old code used a fixed 5s timer that raced
-	the reload; poll for up to ~30s instead so the timing can never lose the race.
-	"""
-	for _ in range(30):
-		for coord in hass.data.get(DOMAIN, {}).values():
-			if component_name in [c[CONF_COMPONENT_NAME] for c in coord.components]:
-				try:
-					await hass.services.async_call(
-						DOMAIN, "install", {"component_name": component_name}, blocking=True
-					)
-				except Exception as err:  # noqa: BLE001 — surface install failures instead of leaking
-					_LOGGER.error("Deployer: auto-install of %s failed: %s", component_name, err)
-				return
-		await asyncio.sleep(1)
-	_LOGGER.error(
-		"Deployer: %s was not registered within 30s of being added; skipping "
-		"auto-install. Run the deployer.install service manually once it appears.",
-		component_name,
-	)
 
 
 def _component_schema(defaults: dict | None = None) -> vol.Schema:
@@ -181,7 +155,7 @@ class ComponentUpdaterOptionsFlow(config_entries.OptionsFlow):
 					errors["base"] = error
 			if not errors:
 				component_name = user_input[CONF_COMPONENT_NAME].strip()
-				self._components.append({
+				new_comp = {
 					CONF_PROJECT_PATH: user_input[CONF_PROJECT_PATH].strip(),
 					CONF_COMPONENT_NAME: component_name,
 					CONF_MODE: user_input[CONF_MODE],
@@ -189,13 +163,15 @@ class ComponentUpdaterOptionsFlow(config_entries.OptionsFlow):
 					CONF_ARCHIVE_SUBDIR: user_input.get(CONF_ARCHIVE_SUBDIR, "").strip(),
 					CONF_DEST_TYPE: user_input.get(CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT),
 					CONF_AUTO_UPDATE: user_input.get(CONF_AUTO_UPDATE, False),
-				})
-				# Auto-install once async_create_entry below has reloaded the entry and
-				# the component is registered. Polling (see _install_when_ready) replaces
-				# the old fixed 5s timer, which raced the reload and failed with "not
-				# found in any configured entry".
+				}
+				self._components.append(new_comp)
+				# Install directly (race-free): install_in_background takes the
+				# credentials and component dict, so it does not depend on the reload
+				# triggered by async_create_entry below having completed.
 				self.hass.async_create_task(
-					_install_when_ready(self.hass, component_name),
+					install_in_background(
+						self.hass, self._server_url, self._token, self._token_username, new_comp
+					),
 					name=f"deployer_autoinstall_{component_name}",
 				)
 				return self.async_create_entry(title="", data={CONF_COMPONENTS: self._components})
@@ -215,7 +191,19 @@ class ComponentUpdaterOptionsFlow(config_entries.OptionsFlow):
 
 		if user_input is not None:
 			name = user_input.get("component")
+			removed = next(
+				(c for c in self._components if c[CONF_COMPONENT_NAME] == name), None
+			)
 			self._components = [c for c in self._components if c[CONF_COMPONENT_NAME] != name]
+			if removed is not None:
+				# Delete installed files + unregister www Lovelace resources on removal.
+				from .installer import async_uninstall_component
+				try:
+					await async_uninstall_component(
+						self.hass, name, removed.get(CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT)
+					)
+				except Exception as err:  # noqa: BLE001
+					_LOGGER.error("Deployer: cleanup of %s failed: %s", name, err)
 			return self.async_create_entry(
 				title="",
 				data={CONF_COMPONENTS: self._components},

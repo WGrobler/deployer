@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 
 import voluptuous as vol
@@ -11,38 +10,12 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import CONF_COMPONENT_NAME, CONF_COMPONENTS, CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT, DOMAIN
 from .coordinator import DeployerCoordinator
+from .installer import async_register_installed_www_resources
+from .util import build_clone_url, install_in_background
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["update"]
-
-
-async def _install_when_ready(hass: HomeAssistant, component_name: str) -> None:
-	"""Install a freshly-added component once the options reload registers it.
-
-	async_update_entry / async_create_entry reload the config entry asynchronously.
-	Until that reload completes the coordinator does not yet list the new component,
-	and deployer.install raises "not found in any configured entry". The previous
-	implementation fired a fixed 5s timer that raced the reload and frequently lost,
-	leaving the component undeployed. Poll for the component instead (up to ~30s) so
-	the install can never lose the race.
-	"""
-	for _ in range(30):
-		for coord in hass.data.get(DOMAIN, {}).values():
-			if component_name in [c[CONF_COMPONENT_NAME] for c in coord.components]:
-				try:
-					await hass.services.async_call(
-						DOMAIN, "install", {"component_name": component_name}, blocking=True
-					)
-				except Exception as err:  # noqa: BLE001 — surface install failures instead of leaking
-					_LOGGER.error("Deployer: auto-install of %s failed: %s", component_name, err)
-				return
-		await asyncio.sleep(1)
-	_LOGGER.error(
-		"Deployer: %s was not registered within 30s of being added; skipping "
-		"auto-install. Run the deployer.install service manually once it appears.",
-		component_name,
-	)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -53,6 +26,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 	await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 	entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+
+	# Self-heal: re-register Lovelace resources for any installed www components.
+	# Registration at install time can silently no-op (resource collection not loaded
+	# yet right after a reload), so re-running it here means a restart restores cards
+	# that never got registered. Idempotent — existing resources are updated in place.
+	await async_register_installed_www_resources(hass, coordinator.components)
 
 	_register_services(hass, coordinator)
 
@@ -71,7 +50,9 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 			if component_name in names:
 				await coord.async_install_component(component_name)
 				return
-		raise ValueError(f"Component '{component_name}' not found in any configured entry")
+		raise ServiceValidationError(
+			f"Component '{component_name}' not found in any configured entry"
+		)
 
 	async def handle_check_updates(call: ServiceCall) -> None:
 		for coord in hass.data[DOMAIN].values():
@@ -92,7 +73,7 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 			CONF_ARCHIVE_SUBDIR, CONF_AUTO_UPDATE, CONF_COMPONENT_NAME,
 			CONF_COMPONENTS, CONF_MODE, CONF_PROJECT_PATH, CONF_REF,
 		)
-		from .installer import _run, build_clone_url
+		from .installer import _run
 
 		component_name: str = call.data["component_name"]
 		project_path: str = call.data["project_path"]
@@ -138,25 +119,41 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 		)
 		_LOGGER.info("Added component %s to deployer", component_name)
 
-		# Auto-install once the options update above has reloaded the entry and the
-		# new component is registered. Polling (see _install_when_ready) replaces the
-		# old fixed 5s timer, which raced the reload and failed with "not found in any
-		# configured entry".
+		# Install directly (race-free): install_in_background takes the credentials and
+		# component dict, so it does not depend on the config-entry reload having
+		# completed — eliminating the old "not found in any configured entry" race.
 		hass.async_create_task(
-			_install_when_ready(hass, component_name),
+			install_in_background(hass, coord.server_url, coord.token, coord.token_username, new_comp),
 			name=f"deployer_autoinstall_{component_name}",
 		)
 
 	async def handle_remove_component(call: ServiceCall) -> None:
-		from .const import CONF_COMPONENT_NAME, CONF_COMPONENTS
+		from .const import CONF_COMPONENT_NAME, CONF_COMPONENTS, CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT
+		from .installer import async_uninstall_component
 		component_name: str = call.data["component_name"]
+		keep_files: bool = call.data.get("keep_files", False)
 		for coord in hass.data[DOMAIN].values():
+			removed = next(
+				(c for c in coord.components if c[CONF_COMPONENT_NAME] == component_name), None
+			)
+			if removed is None:
+				continue
 			updated = [c for c in coord.components if c[CONF_COMPONENT_NAME] != component_name]
-			if len(updated) < len(coord.components):
-				hass.config_entries.async_update_entry(coord.entry, options={CONF_COMPONENTS: updated})
-				_LOGGER.info("Removed component %s from deployer", component_name)
-				return
-		raise ValueError(f"Component '{component_name}' not found in any configured entry")
+			hass.config_entries.async_update_entry(coord.entry, options={CONF_COMPONENTS: updated})
+			_LOGGER.info("Removed component %s from deployer", component_name)
+			if not keep_files:
+				# Delete the installed files and, for www components, unregister the
+				# Lovelace resources so removal leaves no orphaned files/resources.
+				try:
+					await async_uninstall_component(
+						hass, component_name, removed.get(CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT)
+					)
+				except Exception as err:  # noqa: BLE001
+					_LOGGER.error("Deployer: cleanup of %s failed: %s", component_name, err)
+			return
+		raise ServiceValidationError(
+			f"Component '{component_name}' not found in any configured entry"
+		)
 
 	hass.services.async_register(
 		DOMAIN, "install", handle_install,
@@ -179,7 +176,10 @@ def _register_services(hass: HomeAssistant, coordinator: DeployerCoordinator) ->
 	)
 	hass.services.async_register(
 		DOMAIN, "remove_component", handle_remove_component,
-		schema=vol.Schema({vol.Required("component_name"): cv.string}),
+		schema=vol.Schema({
+			vol.Required("component_name"): cv.string,
+			vol.Optional("keep_files", default=False): cv.boolean,
+		}),
 	)
 
 

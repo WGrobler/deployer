@@ -76,7 +76,7 @@ add_component:
 
 remove_component:
   name: Remove Component
-  description: Remove a component from management (does not uninstall the files).
+  description: Remove a component from management. By default this also deletes its installed files and, for www components, unregisters its Lovelace resources. Set keep_files to leave the files in place.
   fields:
     component_name:
       name: Component Name
@@ -84,3 +84,10 @@ remove_component:
       required: true
       selector:
         text:
+    keep_files:
+      name: Keep Files
+      description: Leave the installed files (and any Lovelace resources) in place instead of deleting them.
+      required: false
+      default: false
+      selector:
+        boolean:

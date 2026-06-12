@@ -5,7 +5,8 @@ from typing import Any
 
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -22,11 +23,39 @@ async def async_setup_entry(
 	async_add_entities: AddEntitiesCallback,
 ) -> None:
 	coordinator: DeployerCoordinator = hass.data[DOMAIN][entry.entry_id]
-	entities = [
-		DeployerUpdateEntity(coordinator, comp[CONF_COMPONENT_NAME])
-		for comp in entry.options.get(CONF_COMPONENTS, [])
-	]
-	async_add_entities(entities)
+	components = entry.options.get(CONF_COMPONENTS, [])
+	current = {comp[CONF_COMPONENT_NAME] for comp in components}
+
+	# Removing a component just stops re-creating its entity; the old registry entry
+	# would otherwise linger as an unavailable orphan. Prune entries no longer backed
+	# by a configured component before adding the current ones.
+	_prune_stale_registrations(hass, entry, current)
+
+	async_add_entities(
+		DeployerUpdateEntity(coordinator, name) for name in current
+	)
+
+
+@callback
+def _prune_stale_registrations(hass: HomeAssistant, entry: ConfigEntry, current: set[str]) -> None:
+	"""Remove update entities/devices for components no longer in this entry."""
+	ent_reg = er.async_get(hass)
+	prefix = f"{entry.entry_id}_"
+	for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+		if ent.domain != "update" or not (ent.unique_id or "").startswith(prefix):
+			continue
+		if ent.unique_id[len(prefix):] not in current:
+			ent_reg.async_remove(ent.entity_id)
+			_LOGGER.info("Deployer: removed stale update entity %s", ent.entity_id)
+
+	dev_reg = dr.async_get(hass)
+	for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+		comp_names = {ident[1] for ident in device.identifiers if ident[0] == DOMAIN}
+		# Device identifier is (DOMAIN, component_name); unlink this entry from devices
+		# whose components are all gone (HA deletes the device once no entries remain).
+		if comp_names and comp_names.isdisjoint(current):
+			dev_reg.async_update_device(device.id, remove_config_entry_id=entry.entry_id)
+			_LOGGER.info("Deployer: removed stale device for %s", ", ".join(sorted(comp_names)))
 
 
 class DeployerUpdateEntity(CoordinatorEntity, UpdateEntity):

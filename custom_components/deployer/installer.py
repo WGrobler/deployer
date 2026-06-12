@@ -21,6 +21,7 @@ from .const import (
 	DEST_TYPE_WWW,
 	DEST_TYPE_CUSTOM_COMPONENT,
 )
+from .util import build_clone_url, redact_url
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,17 +60,6 @@ def _save_meta(hass: HomeAssistant, component_name: str, meta: dict, dest_type: 
 	(dest / META_FILENAME).write_text(json.dumps(meta, indent=2))
 
 
-def build_clone_url(server_url: str, token: str, token_username: str, project_path: str) -> str:
-	"""Build an authenticated HTTPS clone URL."""
-	host = server_url.replace("https://", "").replace("http://", "")
-	scheme = "https" if server_url.startswith("https") else "http"
-	if token and token_username:
-		return f"{scheme}://{token_username}:{token}@{host}/{project_path}.git"
-	if token:
-		return f"{scheme}://oauth2:{token}@{host}/{project_path}.git"
-	return f"{scheme}://{host}/{project_path}.git"
-
-
 async def _run(cmd: list[str], timeout: int = 60) -> tuple[int, str, str]:
 	import os
 	env = os.environ.copy()
@@ -88,7 +78,7 @@ async def _run(cmd: list[str], timeout: int = 60) -> tuple[int, str, str]:
 	except asyncio.TimeoutError:
 		proc.kill()
 		await proc.communicate()
-		raise RuntimeError(f"Command timed out after {timeout}s: {' '.join(cmd[:3])}")
+		raise RuntimeError(f"Command timed out after {timeout}s: {redact_url(' '.join(cmd[:3]))}")
 	return proc.returncode, stdout.decode(), stderr.decode()
 
 
@@ -103,7 +93,7 @@ async def get_latest_commit(
 	clone_url = build_clone_url(server_url, token, token_username, project_path)
 	rc, stdout, stderr = await _run(["git", "ls-remote", clone_url, f"refs/heads/{ref}", f"refs/tags/{ref}"])
 	if rc != 0:
-		raise RuntimeError(f"git ls-remote failed: {stderr.strip()}")
+		raise RuntimeError(f"git ls-remote failed: {redact_url(stderr.strip())}")
 	for line in stdout.splitlines():
 		sha, _ = line.split("\t", 1)
 		return sha.strip()
@@ -207,7 +197,7 @@ async def install_component(
 			timeout=120,
 		)
 		if rc != 0:
-			raise RuntimeError(f"git clone failed: {stderr.strip()}")
+			raise RuntimeError(f"git clone failed: {redact_url(stderr.strip())}")
 
 		rc2, sha_out, _ = await _run(["git", "-C", tmpdir, "rev-parse", "HEAD"])
 		commit_sha = sha_out.strip() if rc2 == 0 else None
@@ -234,17 +224,31 @@ async def install_component(
 
 	if dest_type == DEST_TYPE_WWW:
 		registered = await _register_lovelace_resources(hass, component_name, dest_path, commit_sha)
-		resource_lines = "\n".join(f"- `{url}`" for url in registered) if registered else "_No new resources registered._"
+		if registered:
+			resource_lines = "\n".join(f"- `{url}`" for url in registered)
+			title = f"Deployer: {component_name} Installed"
+			message = (
+				f"**{component_name}** ({short_sha}) has been installed to `/config/www/{component_name}/`.\n\n"
+				f"Lovelace resources registered:\n{resource_lines}\n\n"
+				"Refresh your browser to load the updated card."
+			)
+		else:
+			# Files copied but no resource registered (YAML mode, collection not ready,
+			# or no .js found). Make the failure actionable instead of silent — the
+			# deployer re-registers www resources on every start (see async_setup_entry).
+			title = f"Deployer: {component_name} Installed — action needed"
+			message = (
+				f"**{component_name}** ({short_sha}) was installed to `/config/www/{component_name}/`, "
+				"but no Lovelace resource could be registered automatically.\n\n"
+				"Restart Home Assistant (the deployer re-registers www resources on start) or add "
+				f"`/local/{component_name}/<file>.js` manually under Settings → Dashboards → Resources."
+			)
 		await hass.services.async_call(
 			"persistent_notification",
 			"create",
 			{
-				"title": f"Deployer: {component_name} Installed",
-				"message": (
-					f"**{component_name}** ({short_sha}) has been installed to `/config/www/{component_name}/`.\n\n"
-					f"Lovelace resources registered:\n{resource_lines}\n\n"
-					"Refresh your browser to load the updated card."
-				),
+				"title": title,
+				"message": message,
 				"notification_id": f"deployer_installed_{component_name}",
 			},
 		)
@@ -261,3 +265,68 @@ async def install_component(
 				"notification_id": f"deployer_restart_{component_name}",
 			},
 		)
+
+
+async def async_register_installed_www_resources(hass: HomeAssistant, components: list[dict]) -> None:
+	"""Re-register Lovelace resources for every installed www component.
+
+	Resource registration at install time can silently no-op (the storage-backed
+	ResourceStorageCollection may not be loaded yet right after a config-entry
+	reload), which leaves cards on disk but unusable. Running this on every
+	async_setup_entry makes registration self-healing: a restart re-registers any
+	missing resources. It is idempotent — _register_lovelace_resources updates
+	existing entries in place rather than duplicating them.
+	"""
+	for comp in components:
+		if comp.get(CONF_DEST_TYPE) != DEST_TYPE_WWW:
+			continue
+		name = comp[CONF_COMPONENT_NAME]
+		dest_path = _www_path(hass) / name
+		if not await hass.async_add_executor_job(dest_path.exists):
+			continue
+		meta = await hass.async_add_executor_job(get_installed_meta, hass, name)
+		commit_sha = meta.get("installed_commit") if meta else None
+		try:
+			await _register_lovelace_resources(hass, name, dest_path, commit_sha)
+		except Exception as err:  # noqa: BLE001 — best-effort self-heal, never block setup
+			_LOGGER.warning("Deployer: could not ensure Lovelace resources for %s: %s", name, err)
+
+
+async def _unregister_lovelace_resources(hass: HomeAssistant, component_name: str) -> None:
+	"""Remove any Lovelace resources pointing at /local/<component_name>/."""
+	lovelace_data = hass.data.get("lovelace")
+	resources = getattr(lovelace_data, "resources", None)
+	if resources is None or not hasattr(resources, "async_delete_item"):
+		return
+	if getattr(resources, "loaded", True) is False:
+		await resources.async_load()
+		resources.loaded = True
+	prefix = f"/local/{component_name}/"
+	for item in list(resources.async_items()):
+		if item["url"].split("?")[0].startswith(prefix):
+			await resources.async_delete_item(item["id"])
+			_LOGGER.info("Deployer: removed Lovelace resource %s", item["url"])
+
+
+async def async_uninstall_component(hass: HomeAssistant, component_name: str, dest_type: str) -> None:
+	"""Delete a component's installed files and, for www, its Lovelace resources."""
+	if dest_type == DEST_TYPE_WWW:
+		await _unregister_lovelace_resources(hass, component_name)
+
+	dest_path = _dest_root(hass, dest_type) / component_name
+	config_root = Path(hass.config.config_dir).resolve()
+
+	def _rm() -> None:
+		target = dest_path.resolve()
+		# Safety: only ever delete a named sub-directory inside the HA config dir,
+		# never a dest root itself or anything outside config_dir.
+		if not component_name or target.name != component_name:
+			return
+		if target == config_root or config_root not in target.parents:
+			_LOGGER.error("Deployer: refusing to delete unsafe path %s", target)
+			return
+		if target.exists():
+			shutil.rmtree(target)
+			_LOGGER.info("Deployer: deleted %s", target)
+
+	await hass.async_add_executor_job(_rm)
