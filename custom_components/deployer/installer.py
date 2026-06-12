@@ -174,7 +174,7 @@ async def _register_lovelace_resources(
 			await resources.async_update_item(existing_by_base[base_url], {"url": versioned_url})
 			_LOGGER.info("Deployer: updated Lovelace resource %s", versioned_url)
 		else:
-			await resources.async_create_item({"type": "module", "url": versioned_url})
+			await resources.async_create_item({"res_type": "module", "url": versioned_url})
 			_LOGGER.info("Deployer: registered Lovelace resource %s", versioned_url)
 		result.append(versioned_url)
 
