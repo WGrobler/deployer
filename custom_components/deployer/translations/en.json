@@ -32,6 +32,7 @@
         "title": "Manage Components",
         "menu_options": {
           "add_component": "Add component",
+          "edit_component": "Edit component",
           "remove_component": "Remove component"
         }
       },
@@ -54,6 +55,30 @@
           "ref": "Branch name (e.g. main) or tag (e.g. v1.2.0).",
           "archive_subdir": "Path within the repo to copy. Leave empty to copy the entire repo root (e.g. custom_components/my_integration or dist).",
           "dest_type": "custom_component = installs to /config/custom_components/ and requires HA restart. www = installs to /config/www/ and registers Lovelace resources (for dashboard cards — no restart needed).",
+          "auto_update": "Automatically install when a new commit is detected on the configured branch."
+        }
+      },
+      "edit_component": {
+        "title": "Edit Component",
+        "data": {
+          "component": "Select component to edit"
+        }
+      },
+      "edit_component_details": {
+        "title": "Edit {component_name}",
+        "description": "Update the tracking settings for **{component_name}**. Saving will reinstall the component from the new branch/tag immediately.",
+        "data": {
+          "mode": "Tracking Mode",
+          "ref": "Branch or Tag",
+          "archive_subdir": "Archive Subdir",
+          "dest_type": "Destination Type",
+          "auto_update": "Auto-update when update is available"
+        },
+        "data_description": {
+          "mode": "branch = always track the latest commit; tag = pin to a specific version.",
+          "ref": "Branch name (e.g. main) or tag (e.g. v1.2.0).",
+          "archive_subdir": "Path within the repo to copy. Leave empty to copy the entire repo root.",
+          "dest_type": "custom_component = installs to /config/custom_components/. www = installs to /config/www/ and registers Lovelace resources.",
           "auto_update": "Automatically install when a new commit is detected on the configured branch."
         }
       },

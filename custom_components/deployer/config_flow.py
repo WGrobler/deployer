@@ -30,6 +30,17 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _edit_component_schema(defaults: dict | None = None) -> vol.Schema:
+	d = defaults or {}
+	return vol.Schema({
+		vol.Required(CONF_MODE, default=d.get(CONF_MODE, MODE_BRANCH)): vol.In([MODE_BRANCH, MODE_TAG]),
+		vol.Required(CONF_REF, default=d.get(CONF_REF, "main")): str,
+		vol.Optional(CONF_ARCHIVE_SUBDIR, default=d.get(CONF_ARCHIVE_SUBDIR, "")): str,
+		vol.Required(CONF_DEST_TYPE, default=d.get(CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT)): vol.In([DEST_TYPE_CUSTOM_COMPONENT, DEST_TYPE_WWW]),
+		vol.Optional(CONF_AUTO_UPDATE, default=d.get(CONF_AUTO_UPDATE, False)): bool,
+	})
+
+
 def _component_schema(defaults: dict | None = None) -> vol.Schema:
 	d = defaults or {}
 	return vol.Schema({
@@ -130,11 +141,12 @@ class ComponentUpdaterOptionsFlow(config_entries.OptionsFlow):
 		self._server_url: str = config_entry.data.get(CONF_SERVER_URL, "")
 		self._token: str = config_entry.data.get(CONF_TOKEN, "")
 		self._token_username: str = config_entry.data.get(CONF_TOKEN_USERNAME, "")
+		self._edit_component_name: str = ""
 
 	async def async_step_init(self, user_input: dict[str, Any] | None = None):
 		return self.async_show_menu(
 			step_id="init",
-			menu_options=["add_component", "remove_component"],
+			menu_options=["add_component", "edit_component", "remove_component"],
 		)
 
 	async def async_step_add_component(self, user_input: dict[str, Any] | None = None):
@@ -182,6 +194,60 @@ class ComponentUpdaterOptionsFlow(config_entries.OptionsFlow):
 			errors=errors,
 			description_placeholders={
 				"archive_subdir_hint": "e.g. custom_components/energy_manager (leave empty if component is at repo root)"
+			},
+		)
+
+	async def async_step_edit_component(self, user_input: dict[str, Any] | None = None):
+		if not self._components:
+			return self.async_abort(reason="no_components")
+
+		if user_input is not None:
+			self._edit_component_name = user_input["component"]
+			return await self.async_step_edit_component_details()
+
+		return self.async_show_form(
+			step_id="edit_component",
+			data_schema=vol.Schema({
+				vol.Required("component"): vol.In(
+					{c[CONF_COMPONENT_NAME]: c[CONF_COMPONENT_NAME] for c in self._components}
+				),
+			}),
+		)
+
+	async def async_step_edit_component_details(self, user_input: dict[str, Any] | None = None):
+		current = next(
+			(c for c in self._components if c[CONF_COMPONENT_NAME] == self._edit_component_name), None
+		)
+		if current is None:
+			return self.async_abort(reason="no_components")
+
+		if user_input is not None:
+			updated_comp = {
+				**current,
+				CONF_MODE: user_input[CONF_MODE],
+				CONF_REF: user_input[CONF_REF].strip(),
+				CONF_ARCHIVE_SUBDIR: user_input.get(CONF_ARCHIVE_SUBDIR, "").strip(),
+				CONF_DEST_TYPE: user_input.get(CONF_DEST_TYPE, DEST_TYPE_CUSTOM_COMPONENT),
+				CONF_AUTO_UPDATE: user_input.get(CONF_AUTO_UPDATE, False),
+			}
+			self._components = [
+				updated_comp if c[CONF_COMPONENT_NAME] == self._edit_component_name else c
+				for c in self._components
+			]
+			self.hass.async_create_task(
+				install_in_background(
+					self.hass, self._server_url, self._token, self._token_username, updated_comp
+				),
+				name=f"deployer_autoinstall_{self._edit_component_name}",
+			)
+			return self.async_create_entry(title="", data={CONF_COMPONENTS: self._components})
+
+		return self.async_show_form(
+			step_id="edit_component_details",
+			data_schema=_edit_component_schema(current),
+			description_placeholders={
+				"component_name": self._edit_component_name,
+				"archive_subdir_hint": "e.g. custom_components/energy_manager (leave empty if component is at repo root)",
 			},
 		)
 

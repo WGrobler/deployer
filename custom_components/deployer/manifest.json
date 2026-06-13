@@ -1,7 +1,7 @@
 {
   "domain": "deployer",
   "name": "Deployer",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "documentation": "https://github.com/WGrobler/deployer",
   "dependencies": [],
   "codeowners": [],
